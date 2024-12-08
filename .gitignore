@@ -1,0 +1,9 @@
+/somedir/
+/.ipynb_checkpoints/
+/output/
+/data/*
+__pycache__/
+/baselines/
+/.idea/
+vae_jupyter_submit.sh
+
