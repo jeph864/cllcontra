@@ -6,4 +6,5 @@ __pycache__/
 /baselines/
 /.idea/
 vae_jupyter_submit.sh
+*.ipynb
 
