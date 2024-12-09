@@ -141,7 +141,7 @@ def accuracy(output, target, topk=(1,)):
         return res
 
 
-def save(model, optimizer, filename, epoch = 0, args=None ):
+def save(model, optimizer, filename, epoch=0, args=None):
     print('==> Saving...')
     args = args or {}
     state = {
@@ -152,3 +152,60 @@ def save(model, optimizer, filename, epoch = 0, args=None ):
     }
     torch.save(state, filename)
     del state
+
+
+def contrastive_forward_fn(model, inputs, labels, loss_fn):
+    images = torch.cat([inputs[0], inputs[1]], dim=0)  # Combine augmented views
+
+    if torch.cuda.is_available():
+        images = images.cuda(non_blocking=True)
+        labels = labels.cuda(non_blocking=True)
+    features = model(images)
+
+    bsz = labels.shape[0]
+    f1, f2 = torch.split(features, [bsz, bsz], dim=0)
+    features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
+    loss = loss_fn(features, labels)
+    return features, loss
+
+
+class AccuracyContext:
+    def __init__(self, compute_accuracy=True, accuracy_fn=None):
+        """
+        Context manager for controlling accuracy computation.
+        Args:
+            compute_accuracy (bool): Whether to compute accuracy.
+        """
+        self.compute_accuracy = compute_accuracy
+        default_accuracy_fn = lambda output, labels: (torch.argmax(output, dim=1) == labels).sum().item()
+        self.accuracy_fn = accuracy_fn or default_accuracy_fn
+        self.total_correct = 0
+        self.total_samples = 0
+
+    def update(self, outputs, labels):
+        """
+        Update the total correct predictions and samples.
+        Args:
+            outputs (Tensor): Model outputs (logits).
+            labels (Tensor): Ground truth labels.
+        """
+        if self.compute_accuracy:
+            correct = self.accuracy_fn(outputs, labels)
+            self.total_correct += correct
+            self.total_samples += labels.size(0)
+
+    def compute(self):
+        """
+        Compute the accuracy based on accumulated results.
+        Returns:
+            float: Accuracy as a percentage.
+        """
+        if self.compute_accuracy and self.total_samples > 0:
+            return (self.total_correct / self.total_samples) * 100.0
+        return 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass

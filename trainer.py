@@ -5,11 +5,11 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from utils import save
+from contrastive.utils import save, AccuracyContext
 
 
-def linear_forward_fn(model, inputs, labels, loss_fn):
-    inputs = inputs.to(model.device)
+def linear_forward_fn(model, inputs, labels, loss_fn, device='cuda'):
+    inputs = inputs.to(device)
     outputs = model(inputs)
     loss = loss_fn(outputs, labels)
     return outputs, loss
@@ -20,7 +20,8 @@ class Trainer:
                  train_loader, optimizer,
                  loss_fn, val_loader=None, scheduler=None, device="cuda", early_stopping=None,
                  accuracy_topk=(1,), lr_warmup_scheduler=None, lr_adjuster=None,
-                 forward_fn=None, save_dir=None, classification=False, save_freq = None
+                 forward_fn=None, save_dir=None, classification=False, save_freq=None,
+                 accuracy_check_fn=None
                  ):
         """
         Initialize the Trainer class.
@@ -48,6 +49,7 @@ class Trainer:
         self.accuracy_topk = accuracy_topk
 
         self.classification = classification
+        self.accuracy_check_fn = accuracy_check_fn or self.compute_accuracy
 
         #### hook
         self.forward_fn = forward_fn or linear_forward_fn
@@ -57,16 +59,24 @@ class Trainer:
         os.makedirs(tmp_save_dir, exist_ok=True)
 
         run_id = len([d for d in os.listdir(tmp_save_dir) if os.path.isdir(os.path.join(tmp_save_dir, d))])
-        tmp_save_dir = os.path.join(tmp_save_dir, 'run_{run}'.format(run= run_id))
-        os.makedirs(tmp_save_dir,  exist_ok=False)
+        tmp_save_dir = os.path.join(tmp_save_dir, 'run_{run}'.format(run=run_id))
+        os.makedirs(tmp_save_dir, exist_ok=False)
 
         os.makedirs(os.path.join(self.save_dir, 'models'), exist_ok=True)
-        self.log_dir = os.path.join(self.save_dir, 'logs', 'run_{run}'.format(run= run_id))
+        self.log_dir = os.path.join(self.save_dir, 'logs', 'run_{run}'.format(run=run_id))
         self.save_dir = tmp_save_dir
         os.makedirs(self.log_dir, exist_ok=True)
         self.writer = SummaryWriter(log_dir=self.log_dir)  # TensorBoard writer
 
     def compute_accuracy(self, output, target):
+        """
+        Default accuracy computation for classification tasks.
+        Args:
+            output: Model output logits or probabilities.
+            target: Ground truth labels.
+        Returns:
+            List of accuracies for each top-k value.
+        """
         with torch.no_grad():
             maxk = max(self.accuracy_topk)
             batch_size = target.size(0)
@@ -82,13 +92,13 @@ class Trainer:
                 res.append(correct_k.mul_(100.0 / batch_size))
             return res
 
-    def train_one_epoch(self, epoch):
+    def train_one_epoch(self, epoch, accuracy_ctx=False):
         """
         Train the model for one epoch.
         Args:
             epoch: Current epoch number.
         Returns:
-            Average training loss for the epoch.
+            Tuple: Average training loss and accuracy for the epoch.
         """
         self.model.train()
         total_loss = 0.0
@@ -96,32 +106,37 @@ class Trainer:
         total_samples = 0
         progress_bar = tqdm(self.train_loader, desc=f"Training Epoch {epoch}")
 
-        for batch_idx, (images, labels) in enumerate(progress_bar):
-            labels = labels.to(self.device)
-            if self.lr_warmup_scheduler:
-                self.lr_warmup_scheduler.step(epoch, batch_idx, progress_bar.total)
-            outputs, loss = self.forward_fn(self.model, images, labels, self.loss_fn)
-            # Backward pass and optimization
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+        with AccuracyContext(accuracy_ctx) as acc_ctx:
 
-            # Log loss
-            total_loss += loss.item()
-            if self.classification:
-                total_correct += (torch.argmax(outputs, dim=1) == labels).sum().item()
-            total_samples += labels.size(0)
+            for batch_idx, (images, labels) in enumerate(progress_bar):
+                labels = labels.to(self.device)
+                if self.lr_warmup_scheduler:
+                    self.lr_warmup_scheduler.step(epoch, batch_idx, progress_bar.total)
+                outputs, loss = self.forward_fn(self.model, images, labels, self.loss_fn, self.device)
+
+                # Backward pass and optimization
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
+                # Log loss
+                total_loss += loss.item()
+
+                acc_ctx.update(outputs, labels)
+                total_samples += labels.size(0)
+
         avg_loss = total_loss / len(self.train_loader)
-        accuracy = total_correct / total_samples
+        accuracy = acc_ctx.compute()
         return avg_loss, accuracy
 
-    def evaluate_one_epoch(self, epoch):
+    def evaluate_one_epoch(self, epoch, accuracy_ctx=False):
         """
         Evaluate the model for one epoch.
         Args:
             epoch: Current epoch number.
         Returns:
-            Average validation loss for the epoch.
+            Tuple: Average validation loss and accuracy for the epoch.
+            :param accuracy_ctx:
         """
         self.model.eval()
         total_loss = 0.0
@@ -130,22 +145,23 @@ class Trainer:
         progress_bar = tqdm(self.val_loader, desc=f"Validation Epoch {epoch}")
 
         with torch.no_grad():
-            for batch_idx, (images, labels) in enumerate(progress_bar):
-                images, labels = images.to(self.device), labels.to(self.device)
+            with AccuracyContext(accuracy_ctx) as acc_ctx:
+                for batch_idx, (images, labels) in enumerate(progress_bar):
+                    images, labels = images.to(self.device), labels.to(self.device)
 
-                # Forward pass
-                outputs, loss = self.forward_fn(self.model, images, labels, self.loss_fn)
+                    # Forward pass
+                    outputs, loss = self.forward_fn(self.model, images, labels, self.loss_fn, self.device)
 
-                # Log loss
-                total_loss += loss.item()
-                if self.classification:
-                    total_correct += (torch.argmax(outputs, dim=1) == labels).sum().item()
-                total_samples += labels.size(0)
+                    # Log loss
+                    total_loss += loss.item()
+                    acc_ctx.update(outputs, labels)
+                    total_samples += labels.size(0)
+
         avg_loss = total_loss / len(self.val_loader)
-        accuracy = total_correct / total_samples
+        accuracy = acc_ctx.compute()
         return avg_loss, accuracy
 
-    def fit(self, num_epochs):
+    def fit(self, num_epochs, *args, **kwargs):
         """
         Train the model for a specified number of epochs.
         Args:
@@ -258,3 +274,84 @@ class EarlyStopping:
         if self.checkpoint_path:
             torch.save(model.state_dict(), self.checkpoint_path)
             # print(f"Checkpoint saved at {self.checkpoint_path}")
+
+
+class CLLTrainer(Trainer):
+    def __init__(self, model,
+                 train_loader, optimizer,
+                 loss_fn, val_loader=None, scheduler=None, device="cuda", early_stopping=None,
+                 accuracy_topk=(1,), lr_warmup_scheduler=None, lr_adjuster=None,
+                 forward_fn=None, save_dir=None, classification=False, save_freq=None,
+                 accuracy_check_fn=None):
+        super().__init__(model, train_loader, optimizer, loss_fn, val_loader,
+                         scheduler, device, early_stopping, accuracy_topk, lr_warmup_scheduler,
+                         lr_adjuster, forward_fn, save_dir, classification, save_freq, accuracy_check_fn
+                         )
+
+    def fit(self, num_epochs, *args, **kwargs):
+        """
+                Train the model for a specified number of epochs.
+                Args:
+                    num_epochs: Total number of epochs to train.
+                    :param forward_fn:
+                """
+        assert 'train_loader' in kwargs and 'test_loader' in kwargs, "Train loder and/or Testloder should be provided"
+        train_loader, test_loader = kwargs['train_loader'], kwargs['test_loader']
+        val_loss = 0
+        for epoch in range(1, num_epochs + 1):
+            if self.lr_adjuster:
+                self.lr_adjuster.adjust(epoch)
+            train_loss, _ = self.train_one_epoch(epoch)
+            if self.val_loader:
+                val_loss, _ = self.evaluate_one_epoch(epoch)
+            train_acc = self.evaluate_accuracy(train_loader, 'train', epoch)
+            test_acc = self.evaluate_accuracy(test_loader, 'test', epoch)
+
+            # Log to TensorBoard
+            self.writer.add_scalars("Loss", {"Train": train_loss, "Validation": val_loss}, epoch)
+            self.writer.add_scalars("Accuracy", {"Train": train_acc, "Validation": test_acc}, epoch)
+
+            # Scheduler step (if applicable)
+            if self.scheduler:
+                self.scheduler.step()
+
+            # Print epoch summary
+            print(
+                f"Epoch {epoch}/{num_epochs} - "
+                f"Train Loss: {train_loss:.4f}, Train Accuracy: {train_acc:.4f} - "
+                f"Val Loss: {val_loss:.4f}, Val Accuracy: {test_acc:.4f}")
+            if self.save_freq and epoch % self.save_freq == 0:
+                filename = os.path.join(self.save_dir, 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
+                save(self.model, self.optimizer, filename)
+
+            if self.early_stopping and self.val_loader:
+                self.early_stopping(val_loss, self.model)
+                if self.early_stopping.early_stop:
+                    print(f"Early stopping triggered after {epoch} epochs.")
+                    break
+
+    def evaluate_accuracy(self, loader, mode, epoch):
+        """
+        Measure accuracy after training or evaluation steps.
+        Args:
+            loader: DataLoader to evaluate (train or test).
+            mode: "Train" or "Test" to indicate the loader type.
+            epoch: Current epoch number.
+        Returns:
+            float: Accuracy percentage.
+        """
+        if not self.classification:
+            return None
+
+        self.model.eval()
+        total_correct = 0
+        total_samples = 0
+
+        with torch.no_grad():
+            for images, labels in tqdm(loader, desc=f"{mode} Accuracy Evaluation (Epoch {epoch})"):
+                images, labels = images.to(self.device), labels.to(self.device)
+                outputs = self.model(images)
+                total_correct += (outputs.argmax(dim=1) == labels).float().sum().item()
+                total_samples += labels.size(0)
+
+        return (total_correct / total_samples) * 100.0
