@@ -1,3 +1,6 @@
+import os
+from typing import Optional, Tuple, Dict
+
 import numpy as np
 import math
 
@@ -145,7 +148,7 @@ def save(model, optimizer, filename, epoch=0, args=None):
     print('==> Saving...')
     args = args or {}
     state = {
-        'opt': args,
+        'args': args,
         'model': model.state_dict(),
         'optimizer': optimizer.state_dict(),
         'epoch': epoch,
@@ -209,3 +212,49 @@ class AccuracyContext:
 
     def __exit__(self, exc_type, exc_value, traceback):
         pass
+
+
+def load_checkpoint(
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        checkpoint_path: str,
+        device: Optional[torch.device] = None
+) -> Tuple[torch.nn.Module, torch.optim.Optimizer, Dict, int]:
+    """
+    Load model and optimizer from a checkpoint
+
+    Args:
+        model: The model architecture (should match the saved one)
+        optimizer: The optimizer (should match the saved one)
+        checkpoint_path: Path to the checkpoint file
+        device: Device to load the model to (if None, will use the same device as the checkpoint)
+
+    Returns:
+        tuple: (loaded_model, loaded_optimizer, training_state, epoch)
+    """
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
+
+    # Load checkpoint on CPU to avoid GPU memory issues
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+    # Load model state
+    model.load_state_dict(checkpoint['model'])
+    if device is not None:
+        model = model.to(device)
+
+    # Load optimizer state
+    optimizer.load_state_dict(checkpoint['optimizer'])
+
+    # If using GPU, move optimizer states to GPU
+    if device is not None and 'cuda' in device.type:
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if torch.is_tensor(v):
+                    state[k] = v.to(device)
+
+    # Get training state and epoch
+    training_state = checkpoint.get('training_state', {})
+    epoch = checkpoint.get('epoch', 0)
+
+    return model, optimizer, training_state, epoch

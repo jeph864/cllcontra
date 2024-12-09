@@ -146,6 +146,54 @@ class ComplementaryLoss(nn.Module):
         return self.loss_fn(f, labels)
 
 
+def logistic_loss(pred):
+    negative_logistic = nn.LogSigmoid()
+    logistic = -1. * negative_logistic(pred)
+    return logistic
+
+
+def scarce_loss(outputs, labels, device):
+    comple_label_mat = torch.zeros_like(outputs)
+    comple_label_mat[torch.arange(comple_label_mat.shape[0]), labels.long()] = 1
+    comple_label_mat = comple_label_mat.to(device)
+    pos_loss = logistic_loss(outputs)
+    neg_loss = logistic_loss(-outputs)
+    neg_data_mat = comple_label_mat.float()
+    unlabel_data_mat = torch.ones_like(neg_data_mat)
+    # calculate negative label loss of negative data
+    neg_loss_neg_data_mat = neg_loss * neg_data_mat
+    tmp1 = neg_data_mat.sum(dim=0)
+    tmp1[tmp1 == 0.] = 1.
+    neg_loss_neg_data_vec = neg_loss_neg_data_mat.sum(dim=0) / tmp1
+    # calculate positive label loss of unlabeled data
+    pos_loss_unlabel_data_mat = pos_loss * unlabel_data_mat
+    tmp2 = unlabel_data_mat.sum(dim=0)
+    tmp2[tmp2 == 0.] = 1.
+    pos_loss_unlabel_data_vec = pos_loss_unlabel_data_mat.sum(dim=0) / tmp2
+    # calculate positive label loss of negative data
+    pos_loss_neg_data_mat = pos_loss * neg_data_mat
+    pos_loss_neg_data_vec = pos_loss_neg_data_mat.sum(dim=0) / tmp1
+    # calculate final loss
+    prior_vec = 1. / outputs.shape[1] * torch.ones(outputs.shape[1])
+    prior_vec = prior_vec.to(device)
+    ccp = 1. - prior_vec
+    loss1 = (ccp * neg_loss_neg_data_vec).sum()
+    unmax_loss_vec = pos_loss_unlabel_data_vec - ccp * pos_loss_neg_data_vec
+    max_loss_vec = torch.abs(unmax_loss_vec)
+    loss2 = max_loss_vec.sum()
+    loss = loss1 + loss2
+    return loss
+
+
+class SCARCE(nn.Module):
+    def __init__(self, device=None):
+        super().__init__()
+        self.device = device
+
+    def forward(self, outputs, labels):
+        return scarce_loss(outputs, labels, self.device), None
+
+
 def complementary_forward_fn(model, inputs, labels, loss_fn, ccp, method="free", device="cuda"):
     """
     Compute the loss for complementary label learning.

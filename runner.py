@@ -1,21 +1,21 @@
+import argparse
 import math
 
-from trainer import Trainer
-from contrastive.losses import SupConLoss
-from contrastive.utils import WarmUpScheduler, LearningRateAdjuster, TwoCropTransform, contrastive_forward_fn
-from contrastive.models import LinearClassifier, SupCEResNet, SupConResNet
-
 import torch
-import torch.nn as nn
-import torch.optim as optim
+
+from cll.algo import ComplementaryLoss, complementary_forward_fn
+from cll.data import LoaderWithComplementaryLabels
+from cll.models import MLP, LinearModel, LeNet
+from contrastive.utils import WarmUpScheduler, LearningRateAdjuster, TwoCropTransform, contrastive_forward_fn
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from torchvision.models import resnet18, ResNet18_Weights
 
 from types import SimpleNamespace
 
+from trainer import Trainer, CLLTrainer
 
-def parse():
+
+def parse_contrastive_args():
     args = dict(
         temp=0.07,
         epochs=100,
@@ -91,6 +91,100 @@ def set_loader(args, classify=False):
     return train_loader, test_loader
 
 
-def run_supcon():
-    args = parse()
-    train_loader, test_loader = set_loader(args)
+def parse_cll_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('-lr', help='optimizer\'s learning rate', default=5e-5, type=float)
+    parser.add_argument('--batch_size', help='batch_size of ordinary labels.', default=256, type=int)
+    parser.add_argument('-dataset', help='specify a dataset', default="mnist", type=str,
+                        required=False)  # mnist, kmnist, fashion, cifar10
+    parser.add_argument('--method', help='method type', choices=['pc', 'nn', 'scarce', 'scarce', 'forward', 'free'],
+                        type=str, required=True)
+    parser.add_argument('--model', help='model name', default='mlp',
+                        choices=['linear', 'mlp', 'resnet', 'densenet', 'lenet', 'convnet'], type=str, required=False)
+    parser.add_argument('--epochs', help='number of epochs', type=int, default=200)
+    parser.add_argument('-wd', help='weight decay', default=1e-5, type=float)
+    parser.add_argument('-seed', help='Random seed', default=0, type=int, required=False)
+    parser.add_argument('-gpu', help='used gpu id', default='0', type=str, required=False)
+    parser.add_argument('-o', help='optimizer', default='adam', type=str, required=False)
+    parser.add_argument('-gen', help='the generation process of complementary labels', default='random',
+                        choices=['random', 'scarce_1', 'scarce_2'], type=str, required=False)
+    parser.add_argument('-run_times', help='random run times', default=0, type=int, required=False)
+
+    args = parser.parse_args()
+    return args
+
+
+def prepare_dataloaders(dataset_name, batch_size):
+    if dataset_name == 'mnist':
+        train_dataset = datasets.MNIST(root='./dataset/mnist', train=True, transform=transforms.ToTensor(),
+                                       download=True)
+        test_dataset = datasets.MNIST(root='./dataset/mnist', train=False, transform=transforms.ToTensor())
+    elif dataset_name == 'kmnist':
+        train_dataset = datasets.KMNIST(root='./dataset/KMNIST', train=True, transform=transforms.ToTensor(),
+                                        download=True)
+        test_dataset = datasets.KMNIST(root='./dataset/KMNIST', train=False, transform=transforms.ToTensor())
+    elif dataset_name == 'fashion':
+        train_dataset = datasets.FashionMNIST(root='./dataset/FashionMnist', train=True,
+                                              transform=transforms.ToTensor(), download=True)
+        test_dataset = datasets.FashionMNIST(root='./dataset/FashionMnist', train=False,
+                                             transform=transforms.ToTensor())
+    elif dataset_name == 'cifar10':
+        train_transform = transforms.Compose(
+            [transforms.ToTensor(),  # transforms.RandomHorizontalFlip(), transforms.RandomCrop(32,4),
+             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))])
+        test_transform = transforms.Compose(
+            [transforms.ToTensor(),
+             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))])
+        train_dataset = datasets.CIFAR10(root='./dataset', train=True, transform=train_transform, download=True)
+        test_dataset = datasets.CIFAR10(root='./dataset', train=False, transform=test_transform)
+
+    else:
+        raise ValueError(f"Dataset {dataset_name} not available")
+
+    # Initialize DatasetWithComplementaryLabels
+    data = LoaderWithComplementaryLabels(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        batch_size=batch_size  # Specify batch size
+    )
+    # Get the loaders and class prior probabilities
+    return data.get_loaders()
+
+
+if __name__ == '__main__':
+    args = parse_cll_args()
+    ordinary_train_loader, complementary_train_loader, test_loader, ccp, dim = (
+        prepare_dataloaders(args.dataset, args.batch_size))
+    device = torch.device("cuda:" + args.gpu if torch.cuda.is_available() else "cpu")
+    K = ordinary_train_loader.dataset.classes
+    if args.model == 'mlp':
+        model = MLP(dim, 500, output_dim=K)
+    elif args.model == 'linear':
+        model = LinearModel(dim, K)
+    elif args.model == 'lenet':
+        model = LeNet(K)
+
+    meta_method = args.method
+    model = model.to(device)
+    if args.op == 'sgd':
+        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.wd, momentum=0.9)
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+
+    trainer = CLLTrainer(
+        model=model,
+        train_loader=complementary_train_loader,
+        val_loader=None,
+        optimizer=optimizer,
+        loss_fn=ComplementaryLoss(K, ccp, args.method),
+        classification=True,
+        device=device,
+        forward_fn=lambda model, inputs, labels, loss_fn, device: complementary_forward_fn(
+            model, inputs, labels, loss_fn, ccp=ccp, method=args.method, device=device
+        ),
+        save_freq=30
+
+    )
+
+    trainer.fit(args.epochs, train_loader=ordinary_train_loader, test_loader=test_loader, offset=270)

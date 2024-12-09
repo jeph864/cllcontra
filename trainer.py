@@ -173,7 +173,8 @@ class Trainer:
         """
         val_loss = 0
         val_acc = 0.0
-        for epoch in range(1, num_epochs + 1):
+        epoch_offset = kwargs['offset'] if 'offset' in kwargs else 1
+        for epoch in range(epoch_offset, num_epochs + 1):
             if self.lr_adjuster:
                 self.lr_adjuster.adjust(epoch)
             train_loss, train_acc = self.train_one_epoch(epoch)
@@ -301,7 +302,8 @@ class CLLTrainer(Trainer):
         assert 'train_loader' in kwargs and 'test_loader' in kwargs, "Train loder and/or Testloder should be provided"
         train_loader, test_loader = kwargs['train_loader'], kwargs['test_loader']
         val_loss = 0
-        for epoch in range(1, num_epochs + 1):
+        epoch_offset = kwargs['offset'] if 'offset' in kwargs else 1
+        for epoch in range(epoch_offset, num_epochs + 1):
             if self.lr_adjuster:
                 self.lr_adjuster.adjust(epoch)
             train_loss, _ = self.train_one_epoch(epoch)
