@@ -3,6 +3,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from contrastive.utils import save, AccuracyContext
@@ -21,7 +22,7 @@ class Trainer:
                  loss_fn, val_loader=None, scheduler=None, device="cuda", early_stopping=None,
                  accuracy_topk=(1,), lr_warmup_scheduler=None, lr_adjuster=None,
                  forward_fn=None, save_dir=None, classification=False, save_freq=None,
-                 accuracy_check_fn=None
+                 accuracy_check_fn=None, verbose=False
                  ):
         """
         Initialize the Trainer class.
@@ -53,6 +54,8 @@ class Trainer:
 
         #### hook
         self.forward_fn = forward_fn or linear_forward_fn
+
+        self.verbose = verbose
 
         self.save_dir = save_dir or 'output'
         tmp_save_dir = os.path.join(self.save_dir, 'models')
@@ -104,18 +107,18 @@ class Trainer:
         total_loss = 0.0
         total_correct = 0
         total_samples = 0
-        progress_bar = tqdm(self.train_loader, desc=f"Training Epoch {epoch}")
+        progress_bar = tqdm(self.train_loader, desc=f"Training Epoch {epoch}", disable= not self.verbose)
 
         with AccuracyContext(accuracy_ctx) as acc_ctx:
 
             for batch_idx, (images, labels) in enumerate(progress_bar):
                 labels = labels.to(self.device)
                 if self.lr_warmup_scheduler:
-                    self.lr_warmup_scheduler.step(epoch, batch_idx, progress_bar.total)
+                    self.lr_warmup_scheduler.step(epoch, batch_idx, len(self.train_loader))
+                self.optimizer.zero_grad()
                 outputs, loss = self.forward_fn(self.model, images, labels, self.loss_fn, self.device)
 
                 # Backward pass and optimization
-                self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
 
@@ -142,7 +145,7 @@ class Trainer:
         total_loss = 0.0
         total_correct = 0
         total_samples = 0
-        progress_bar = tqdm(self.val_loader, desc=f"Validation Epoch {epoch}")
+        progress_bar = tqdm(self.val_loader, desc=f"Validation Epoch {epoch}", disable= not self.verbose)
 
         with torch.no_grad():
             with AccuracyContext(accuracy_ctx) as acc_ctx:
@@ -302,8 +305,7 @@ class CLLTrainer(Trainer):
             if self.lr_adjuster:
                 self.lr_adjuster.adjust(epoch)
             train_loss, _ = self.train_one_epoch(epoch)
-            if self.val_loader:
-                val_loss, _ = self.evaluate_one_epoch(epoch)
+
             train_acc = self.evaluate_accuracy(train_loader, 'train', epoch)
             test_acc = self.evaluate_accuracy(test_loader, 'test', epoch)
 
@@ -319,16 +321,12 @@ class CLLTrainer(Trainer):
             print(
                 f"Epoch {epoch}/{num_epochs} - "
                 f"Train Loss: {train_loss:.4f}, Train Accuracy: {train_acc:.4f} - "
-                f"Val Loss: {val_loss:.4f}, Val Accuracy: {test_acc:.4f}")
+                #f"Val Loss: {val_loss:.4f}, Val Accuracy: {test_acc:.4f}"
+            )
             if self.save_freq and epoch % self.save_freq == 0:
                 filename = os.path.join(self.save_dir, 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
                 save(self.model, self.optimizer, filename)
 
-            if self.early_stopping and self.val_loader:
-                self.early_stopping(val_loss, self.model)
-                if self.early_stopping.early_stop:
-                    print(f"Early stopping triggered after {epoch} epochs.")
-                    break
 
     def evaluate_accuracy(self, loader, mode, epoch):
         """
@@ -346,12 +344,11 @@ class CLLTrainer(Trainer):
         self.model.eval()
         total_correct = 0
         total_samples = 0
-
         with torch.no_grad():
             for images, labels in tqdm(loader, desc=f"{mode} Accuracy Evaluation (Epoch {epoch})"):
                 images, labels = images.to(self.device), labels.to(self.device)
                 outputs = self.model(images)
-                total_correct += (outputs.argmax(dim=1) == labels).float().sum().item()
+                _, preds = torch.max(F.softmax(outputs, dim=1).data, 1)
+                total_correct += (preds == labels).sum().item()
                 total_samples += labels.size(0)
-
-        return (total_correct / total_samples) * 100.0
+        return 100.0 * total_correct / total_samples

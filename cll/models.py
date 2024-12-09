@@ -22,10 +22,11 @@ class LinearModel(nn.Module):
 
 class MLP(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
-        super(MLP, self).__init__()
+        super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.relu1 = nn.ReLU()
         self.fc2 = nn.Linear(hidden_dim, output_dim)
+
     def forward(self, x):
         out = x.view(-1, num_flat_features(x))
         out = self.fc1(out)

@@ -37,24 +37,6 @@ def non_negative_loss(f, K, labels, ccp, beta):
     return final_loss, torch.mul(torch.from_numpy(count).float().to(device), loss_vector)
 
 
-def forward_loss(f, K, labels):
-    Q = torch.ones(K, K) * 1 / (K - 1)
-    Q = Q.to(device)
-    for k in range(K):
-        Q[k, k] = 0
-    q = torch.mm(F.softmax(f, 1), Q)
-    return F.nll_loss(q.log(), labels.long())
-
-
-def pc_loss(f, K, labels):
-    sigmoid = nn.Sigmoid()
-    fbar = f.gather(1, labels.long().view(-1, 1)).repeat(1, K)
-    loss_matrix = sigmoid(-1. * (f - fbar))  # multiply -1 for "complementary"
-    M1, M2 = K * (K - 1) / 2, K - 1
-    pc_loss = torch.sum(loss_matrix) * (K - 1) / len(labels) - M1 + M2
-    return pc_loss, None
-
-
 class AssumpFreeLoss(nn.Module):
     def __init__(self, K, ccp):
         """
@@ -86,6 +68,7 @@ class NonNegativeLoss(nn.Module):
         self.beta = beta
 
     def forward(self, f, labels):
+        K = self.K
         return non_negative_loss(f=f, K=self.K, labels=labels, ccp=self.ccp, beta=self.beta)[0]
 
 
@@ -100,7 +83,12 @@ class ForwardLoss(nn.Module):
         self.K = K
 
     def forward(self, f, labels):
-        return forward_loss(f=f, K=self.K, labels=labels)
+        Q = torch.ones(self.K, self.K) * 1 / (self.K - 1)
+        Q = Q.to(device)
+        for k in range(self.K):
+            Q[k, k] = 0
+        q = torch.mm(F.softmax(f, 1), Q)
+        return F.nll_loss(q.log(), labels.long())
 
 
 class PCLoss(nn.Module):
@@ -112,9 +100,16 @@ class PCLoss(nn.Module):
         """
         super().__init__()
         self.K = K
+        print("Number of classes: ", K)
 
     def forward(self, f, labels):
-        return pc_loss(f=f, K=self.K, labels=labels)
+        K = self.K
+        sigmoid = nn.Sigmoid()
+        fbar = f.gather(1, labels.long().view(-1, 1)).repeat(1, K)
+        loss_matrix = sigmoid(-1. * (f - fbar))  # multiply -1 for "complementary"
+        M1, M2 = K * (K - 1) / 2, K - 1
+        pc_loss = torch.sum(loss_matrix) * (K - 1) / len(labels) - M1 + M2
+        return pc_loss, None
 
 
 class ComplementaryLoss(nn.Module):
@@ -130,6 +125,7 @@ class ComplementaryLoss(nn.Module):
         self.K = K
         self.ccp = ccp
         self.meta_method = meta_method
+        print("Method: ", self.meta_method)
         self.loss_fn = self._initialize_loss_fn()
 
     def _initialize_loss_fn(self):
@@ -148,18 +144,6 @@ class ComplementaryLoss(nn.Module):
 
     def forward(self, f, labels):
         return self.loss_fn(f, labels)
-
-
-def accuracy_check(loader, model):
-    total, num_samples = 0, 0
-    for images, labels in loader:
-        labels, images = labels.to(device), images.to(device)
-        outputs = model(images)
-        sm_outputs = F.softmax(outputs, dim=1)
-        _, predicted = torch.max(sm_outputs.data, 1)
-        total += (predicted == labels).sum().item()
-        num_samples += labels.size(0)
-    return 100 * total / num_samples
 
 
 def complementary_forward_fn(model, inputs, labels, loss_fn, ccp, method="free", device="cuda"):
