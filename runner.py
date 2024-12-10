@@ -3,16 +3,16 @@ import math
 
 import torch
 
-from cll.algo import ComplementaryLoss, complementary_forward_fn
-from cll.data import LoaderWithComplementaryLabels
-from cll.models import MLP, LinearModel, LeNet
-from contrastive.utils import WarmUpScheduler, LearningRateAdjuster, TwoCropTransform, contrastive_forward_fn
+from cllcontra.losses import ComplementaryLoss, complementary_forward_fn
+from cllcontra.data import LoaderWithComplementaryLabels
+from cllcontra.models import MLP, LinearModel, LeNet
+from cllcontra.utils import WarmUpScheduler, LearningRateAdjuster, TwoCropTransform, contrastive_forward_fn
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from types import SimpleNamespace
 
-from trainer import Trainer, CLLTrainer
+from cllcontra.trainer import Trainer, CLLTrainer
 
 
 def parse_contrastive_args():
@@ -117,17 +117,17 @@ def parse_cll_args():
 
 def prepare_dataloaders(dataset_name, batch_size):
     if dataset_name == 'mnist':
-        train_dataset = datasets.MNIST(root='./dataset/mnist', train=True, transform=transforms.ToTensor(),
+        train_dataset = datasets.MNIST(root='./data/mnist', train=True, transform=transforms.ToTensor(),
                                        download=True)
-        test_dataset = datasets.MNIST(root='./dataset/mnist', train=False, transform=transforms.ToTensor())
+        test_dataset = datasets.MNIST(root='./data/mnist', train=False, transform=transforms.ToTensor())
     elif dataset_name == 'kmnist':
-        train_dataset = datasets.KMNIST(root='./dataset/KMNIST', train=True, transform=transforms.ToTensor(),
+        train_dataset = datasets.KMNIST(root='./data/KMNIST', train=True, transform=transforms.ToTensor(),
                                         download=True)
-        test_dataset = datasets.KMNIST(root='./dataset/KMNIST', train=False, transform=transforms.ToTensor())
+        test_dataset = datasets.KMNIST(root='./data/KMNIST', train=False, transform=transforms.ToTensor())
     elif dataset_name == 'fashion':
-        train_dataset = datasets.FashionMNIST(root='./dataset/FashionMnist', train=True,
+        train_dataset = datasets.FashionMNIST(root='./data/FashionMnist', train=True,
                                               transform=transforms.ToTensor(), download=True)
-        test_dataset = datasets.FashionMNIST(root='./dataset/FashionMnist', train=False,
+        test_dataset = datasets.FashionMNIST(root='./data/FashionMnist', train=False,
                                              transform=transforms.ToTensor())
     elif dataset_name == 'cifar10':
         train_transform = transforms.Compose(
@@ -136,8 +136,8 @@ def prepare_dataloaders(dataset_name, batch_size):
         test_transform = transforms.Compose(
             [transforms.ToTensor(),
              transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))])
-        train_dataset = datasets.CIFAR10(root='./dataset', train=True, transform=train_transform, download=True)
-        test_dataset = datasets.CIFAR10(root='./dataset', train=False, transform=test_transform)
+        train_dataset = datasets.CIFAR10(root='./data', train=True, transform=train_transform, download=True)
+        test_dataset = datasets.CIFAR10(root='./data', train=False, transform=test_transform)
 
     else:
         raise ValueError(f"Dataset {dataset_name} not available")
@@ -157,7 +157,7 @@ if __name__ == '__main__':
     ordinary_train_loader, complementary_train_loader, test_loader, ccp, dim = (
         prepare_dataloaders(args.dataset, args.batch_size))
     device = torch.device("cuda:" + args.gpu if torch.cuda.is_available() else "cpu")
-    K = ordinary_train_loader.dataset.classes
+    K = len(ordinary_train_loader.dataset.classes)
     if args.model == 'mlp':
         model = MLP(dim, 500, output_dim=K)
     elif args.model == 'linear':
@@ -167,7 +167,7 @@ if __name__ == '__main__':
 
     meta_method = args.method
     model = model.to(device)
-    if args.op == 'sgd':
+    if args.o == 'sgd':
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.wd, momentum=0.9)
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
@@ -187,4 +187,4 @@ if __name__ == '__main__':
 
     )
 
-    trainer.fit(args.epochs, train_loader=ordinary_train_loader, test_loader=test_loader, offset=270)
+    trainer.fit(args.epochs, train_loader=ordinary_train_loader, test_loader=test_loader)

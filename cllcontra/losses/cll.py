@@ -113,7 +113,7 @@ class PCLoss(nn.Module):
 
 
 class ComplementaryLoss(nn.Module):
-    def __init__(self, K, ccp, meta_method):
+    def __init__(self, K, ccp, meta_method, device=None):
         """
         Dynamically choose a loss function.
         Args:
@@ -127,6 +127,7 @@ class ComplementaryLoss(nn.Module):
         self.meta_method = meta_method
         print("Method: ", self.meta_method)
         self.loss_fn = self._initialize_loss_fn()
+        self.device = device
 
     def _initialize_loss_fn(self):
         if self.meta_method == 'free':
@@ -139,6 +140,8 @@ class ComplementaryLoss(nn.Module):
             return PCLoss(K=self.K)
         elif self.meta_method == 'ga':
             return AssumpFreeLoss(K=self.K, ccp=self.ccp)
+        elif self.meta_method == "scarce":
+            return SCARCE(self.device)
         else:
             raise ValueError(f"Unsupported meta_method: {self.meta_method}")
 

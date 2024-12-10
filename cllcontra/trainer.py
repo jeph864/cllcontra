@@ -6,7 +6,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from contrastive.utils import save, AccuracyContext
+from .utils import save, AccuracyContext
 
 
 def linear_forward_fn(model, inputs, labels, loss_fn, device='cuda'):
@@ -303,6 +303,7 @@ class CLLTrainer(Trainer):
         train_loader, test_loader = kwargs['train_loader'], kwargs['test_loader']
         val_loss = 0
         epoch_offset = kwargs['offset'] if 'offset' in kwargs else 1
+        print("Started fitting...")
         for epoch in range(epoch_offset, num_epochs + 1):
             if self.lr_adjuster:
                 self.lr_adjuster.adjust(epoch)

@@ -202,7 +202,7 @@ class LoaderWithComplementaryLabels:
                 batch_size=self.batch_size,
                 shuffle=True
             )
-            dim = int(data_batch.reshape(-1).shape[0]/data.shape[0])
+            dim = int(data_batch.reshape(-1).shape[0]/data_batch.shape[0])
 
             return ordinary_train_loader, complementary_train_loader, ccp, dim
 
