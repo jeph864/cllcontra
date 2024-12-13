@@ -157,19 +157,16 @@ def save(model, optimizer, filename, epoch=0, args=None):
     del state
 
 
-def contrastive_forward_fn(model, inputs, labels, loss_fn):
+def contrastive_forward_fn(model, batch, loss_fn):
+    inputs, labels = batch
     images = torch.cat([inputs[0], inputs[1]], dim=0)  # Combine augmented views
-
-    if torch.cuda.is_available():
-        images = images.cuda(non_blocking=True)
-        labels = labels.cuda(non_blocking=True)
-    features = model(images)
+    features = model(images.to(inputs[0].device))
 
     bsz = labels.shape[0]
     f1, f2 = torch.split(features, [bsz, bsz], dim=0)
     features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
-    loss = loss_fn(features, labels)
-    return features, loss
+    loss = loss_fn(features)
+    return features, loss, bsz, None
 
 
 class AccuracyContext:

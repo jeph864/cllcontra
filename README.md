@@ -5,8 +5,6 @@ Okay, let's start with loading some necessary libraries
 ```python
 # Import required modules
 import torchvision.transforms as transforms
-import torchvision.datasets as dsets
-from types import SimpleNamespace
 import torch
 ```
  Now What we need for complementary label learning.
@@ -17,21 +15,21 @@ can be instianted independently. If you're interested take a look at cll/algo.py
 
 
 ```python
-from cll.data import LoaderWithComplementaryLabels
-from cll.models import MLP, LinearModel
-from cll.algo import complementary_forward_fn, ComplementaryLoss
+from cllcontra.models import MLP, LinearModel
+from cllcontra.losses import complementary_forward_fn, ComplementaryLoss
 ```
  And now our Trainer: We only need CLLTrainer. Which is just our general Trainer but adjusted
  to complementary label learning => Train with a complementary dataset and evaluate our model on ordinary train and test datasets.
 
 
 ```python
-from trainer import Trainer, CLLTrainer
+from cllcontra.trainer import Trainer, CLLTrainer
 ```
 
 Let's define some hyperparameters.
 
 ```python
+from types import SimpleNamespace
 args = SimpleNamespace(
     weight_decay=1e-4, 
     epochs = 1000, 
@@ -46,6 +44,8 @@ Go ahead and get your dataset and feed it into our handler built for complementa
 complementary labels, and the necessary loaders.
 
 ```python
+import torchvision.datasets as dsets
+from cllcontra.data import LoaderWithComplementaryLabels
 # Define train and test datasets
 train_dataset = dsets.MNIST(root='./data/mnist', train=True, transform=transforms.ToTensor(), download=True)
 test_dataset = dsets.MNIST(root='./data/mnist', train=False, transform=transforms.ToTensor())

@@ -4,16 +4,22 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
+import tensorboard_logger as tb_logger
 from tqdm import tqdm
+from collections import namedtuple
 from .utils import save, AccuracyContext
 
+ForwardResult = namedtuple("ForwardResult", ["outputs", "loss", "batch_size", "labels"])
 
-def linear_forward_fn(model, inputs, labels, loss_fn, device='cuda'):
-    inputs = inputs.to(device)
+
+def linear_forward_fn(model, batch, loss_fn, device='cuda'):
+    features, labels = batch
+    inputs = features.to(device)
+    labels = labels.to(device)
     outputs = model(inputs)
     loss = loss_fn(outputs, labels)
-    return outputs, loss
+    return outputs, loss, labels.size(0), labels
 
 
 class Trainer:
@@ -22,7 +28,7 @@ class Trainer:
                  loss_fn, val_loader=None, scheduler=None, device="cuda", early_stopping=None,
                  accuracy_topk=(1,), lr_warmup_scheduler=None, lr_adjuster=None,
                  forward_fn=None, save_dir=None, classification=False, save_freq=None,
-                 accuracy_check_fn=None, verbose=False
+                 accuracy_check_fn=None, batch_hook=None, verbose=False, base_dir=None
                  ):
         """
         Initialize the Trainer class.
@@ -34,7 +40,8 @@ class Trainer:
             loss_fn: Loss function to optimize.
             device: Device to use for computation ('cuda' or 'cpu').
         """
-        self.model = model.to(device)
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = model.to(self.device)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.optimizer = optimizer
@@ -42,7 +49,6 @@ class Trainer:
         self.scheduler = scheduler
         self.lr_warmup_scheduler = lr_warmup_scheduler
         self.lr_adjuster = lr_adjuster
-        self.device = device
 
         self.save_freq = save_freq
 
@@ -52,24 +58,51 @@ class Trainer:
         self.classification = classification
         self.accuracy_check_fn = accuracy_check_fn or self.compute_accuracy
 
-        #### hook
+        # hooks
         self.forward_fn = forward_fn or linear_forward_fn
 
+        self.batch_hook = batch_hook
+
         self.verbose = verbose
+        self.base_dir = base_dir or 'output'
+        self.experiment_name = save_dir
+        self.log_dir = None
+        self._prepare_directories()
+        self.logger = tb_logger.Logger(self.log_dir)
+        #print(self.log_dir)
+        #tb_logger.configure(self.log_dir)
 
-        self.save_dir = save_dir or 'output'
-        tmp_save_dir = os.path.join(self.save_dir, 'models')
+    def _prepare_directories(self):
+        """
+        Prepare directories for saving models and logs.
+        """
+        self.experiment_name = self.experiment_name or ''
+        tmp_save_dir = os.path.join(self.base_dir, self.experiment_name)
         os.makedirs(tmp_save_dir, exist_ok=True)
-
         run_id = len([d for d in os.listdir(tmp_save_dir) if os.path.isdir(os.path.join(tmp_save_dir, d))])
-        tmp_save_dir = os.path.join(tmp_save_dir, 'run_{run}'.format(run=run_id))
+        tmp_save_dir = os.path.join(tmp_save_dir, f'run_{run_id}')
         os.makedirs(tmp_save_dir, exist_ok=False)
-
-        os.makedirs(os.path.join(self.save_dir, 'models'), exist_ok=True)
-        self.log_dir = os.path.join(self.save_dir, 'logs', 'run_{run}'.format(run=run_id))
-        self.save_dir = tmp_save_dir
+        # os.makedirs(os.path.join(self.experiment_name, 'models'), exist_ok=True)
+        self.log_dir = os.path.join(tmp_save_dir, 'logs')
+        # self.experiment_name = tmp_save_dir
         os.makedirs(self.log_dir, exist_ok=True)
-        self.writer = SummaryWriter(log_dir=self.log_dir)  # TensorBoard writer
+
+    def move_batch_to_device(self, batch):
+        """
+        Recursively move all tensors in the batch to the specified device.
+        Handles nested lists, tuples, and dictionaries.
+        """
+        if isinstance(batch, torch.Tensor):
+            return batch.to(self.device)
+        elif isinstance(batch, (list, tuple)):
+            # Recursively handle lists and tuples
+            return type(batch)(self.move_batch_to_device(item) for item in batch)
+        elif isinstance(batch, dict):
+            # Recursively handle dictionaries
+            return {key: self.move_batch_to_device(value) for key, value in batch.items()}
+        else:
+            # Return the element as is if it's not a tensor, list, tuple, or dict
+            return batch
 
     def compute_accuracy(self, output, target):
         """
@@ -95,81 +128,118 @@ class Trainer:
                 res.append(correct_k.mul_(100.0 / batch_size))
             return res
 
-    def train_one_epoch(self, epoch, accuracy_ctx=False):
+    def train_one_epoch(self, epoch, accuracy_ctx=True):
         """
         Train the model for one epoch.
         Args:
             epoch: Current epoch number.
         Returns:
             Tuple: Average training loss and accuracy for the epoch.
+            :param accuracy_ctx:
         """
         self.model.train()
         total_loss = 0.0
         total_correct = 0
         total_samples = 0
-        progress_bar = tqdm(self.train_loader, desc=f"Training Epoch {epoch}", disable= not self.verbose)
+        progress_bar = tqdm(self.train_loader, desc=f"Training Epoch {epoch}", disable=not self.verbose)
 
         with AccuracyContext(accuracy_ctx) as acc_ctx:
 
-            for batch_idx, (images, labels) in enumerate(progress_bar):
-                labels = labels.to(self.device)
+            for batch_idx, batch in enumerate(progress_bar):
+                batch = self.move_batch_to_device(batch)
                 if self.lr_warmup_scheduler:
                     self.lr_warmup_scheduler.step(epoch, batch_idx, len(self.train_loader))
                 self.optimizer.zero_grad()
-                outputs, loss = self.forward_fn(self.model, images, labels, self.loss_fn, self.device)
-
+                outputs, loss, batch_size, labels = self.forward_fn(self.model, batch, self.loss_fn)
+                forward_result = ForwardResult(outputs=outputs, loss=loss, batch_size=batch_size, labels=labels)
                 # Backward pass and optimization
                 loss.backward()
                 self.optimizer.step()
 
                 # Log loss
                 total_loss += loss.item()
-
-                acc_ctx.update(outputs, labels)
-                total_samples += labels.size(0)
+                if self.batch_hook:
+                    self.batch_hook(
+                        epoch=epoch,
+                        batch_idx=batch_idx,
+                        batch=batch,
+                        outputs=forward_result,
+                        trainer=self
+                    )
+                if labels is not None:
+                    acc_ctx.update(outputs, labels)
+                total_samples += batch_size
 
         avg_loss = total_loss / len(self.train_loader)
         accuracy = acc_ctx.compute()
         return avg_loss, accuracy
 
-    def evaluate_one_epoch(self, epoch, accuracy_ctx=False):
+    def evaluate_one_epoch(self, epoch, accuracy_ctx=True):
         """
         Evaluate the model for one epoch.
         Args:
             epoch: Current epoch number.
         Returns:
             Tuple: Average validation loss and accuracy for the epoch.
+            :param epoch:
             :param accuracy_ctx:
         """
         self.model.eval()
         total_loss = 0.0
         total_correct = 0
         total_samples = 0
-        progress_bar = tqdm(self.val_loader, desc=f"Validation Epoch {epoch}", disable= not self.verbose)
+        progress_bar = tqdm(self.val_loader, desc=f"Validation Epoch {epoch}", disable=not self.verbose)
 
         with torch.no_grad():
             with AccuracyContext(accuracy_ctx) as acc_ctx:
-                for batch_idx, (images, labels) in enumerate(progress_bar):
-                    images, labels = images.to(self.device), labels.to(self.device)
-
+                for batch_idx, batch in enumerate(progress_bar):
                     # Forward pass
-                    outputs, loss = self.forward_fn(self.model, images, labels, self.loss_fn, self.device)
+                    batch = self.move_batch_to_device(batch)
+                    outputs, loss, batch_size, labels = self.forward_fn(self.model, batch, self.loss_fn)
 
                     # Log loss
                     total_loss += loss.item()
-                    acc_ctx.update(outputs, labels)
-                    total_samples += labels.size(0)
+
+                    if labels is not None:
+                        acc_ctx.update(outputs, labels)
+                    total_samples += batch_size
 
         avg_loss = total_loss / len(self.val_loader)
         accuracy = acc_ctx.compute()
         return avg_loss, accuracy
+
+    def log(self, name, value, prefix=None, epoch=None):
+        """
+        Log a metric  to tensorboard_logger.
+        Args:
+            prefix: Prefix for the metric name (e.g., 'Train' or 'Validation').
+            epoch: Current epoch number.
+        """
+        if self.log_dir is None:
+            return
+        if prefix is not None:
+            name = f"{prefix}/name"
+        self.logger.log_value(name, value, epoch)
+
+    def log_metrics(self, metrics, prefix, epoch):
+        """
+        Log metrics to tensorboard_logger.
+        Args:
+            metrics: Dictionary of metric names and values.
+            prefix: Prefix for the metric name (e.g., 'Train' or 'Validation').
+            epoch: Current epoch number.
+        """
+        if self.log_dir is None:
+            return
+        for key, value in metrics.items():
+            self.logger.log_value(f"{prefix}/{key}", value, epoch)
 
     def fit(self, num_epochs, *args, **kwargs):
         """
         Train the model for a specified number of epochs.
         Args:
             num_epochs: Total number of epochs to train.
-            :param forward_fn:
+            :param num_epochs:
         """
         val_loss = 0
         val_acc = 0.0
@@ -182,9 +252,8 @@ class Trainer:
                 val_loss, val_acc = self.evaluate_one_epoch(epoch)
 
             # Log to TensorBoard
-            self.writer.add_scalars("Loss", {"Train": train_loss, "Validation": val_loss}, epoch)
-            self.writer.add_scalars("Accuracy", {"Train": train_acc, "Validation": val_acc}, epoch)
-
+            self.log_metrics({"Train": train_loss, "Validation": val_loss}, "Loss", epoch)
+            self.log_metrics({"Train": train_acc, "Validation": val_acc}, "Accuracy", epoch)
             # Scheduler step (if applicable)
             if self.scheduler:
                 self.scheduler.step()
@@ -194,8 +263,8 @@ class Trainer:
                 f"Epoch {epoch}/{num_epochs} - "
                 f"Train Loss: {train_loss:.4f}, Train Accuracy: {train_acc:.4f} - "
                 f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_acc:.4f}")
-            if self.save_freq and epoch % self.save_freq == 0:
-                filename = os.path.join(self.save_dir, 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
+            if self.experiment_name is not None and self.save_freq and epoch % self.save_freq == 0:
+                filename = os.path.join(self.experiment_name, 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
                 save(self.model, self.optimizer, filename)
 
             if self.early_stopping and self.val_loader:
@@ -313,8 +382,8 @@ class CLLTrainer(Trainer):
             test_acc = self.evaluate_accuracy(test_loader, 'test', epoch)
 
             # Log to TensorBoard
-            self.writer.add_scalars("Loss", {"Train": train_loss, "Validation": val_loss}, epoch)
-            self.writer.add_scalars("Accuracy", {"Train": train_acc, "Validation": test_acc}, epoch)
+            self.log_metrics({"Train": train_loss, "Validation": val_loss}, "Loss", epoch)
+            self.log_metrics({"Train": train_acc, "Validation": test_acc}, "Accuracy", epoch)
 
             # Scheduler step (if applicable)
             if self.scheduler:
@@ -327,9 +396,8 @@ class CLLTrainer(Trainer):
                 #f"Val Loss: {val_loss:.4f}, Val Accuracy: {test_acc:.4f}"
             )
             if self.save_freq and epoch % self.save_freq == 0:
-                filename = os.path.join(self.save_dir, 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
+                filename = os.path.join(self.experiment_name, 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
                 save(self.model, self.optimizer, filename)
-
 
     def evaluate_accuracy(self, loader, mode, epoch):
         """

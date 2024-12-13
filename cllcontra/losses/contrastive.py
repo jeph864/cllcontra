@@ -5,14 +5,16 @@ Date: May 07, 2020
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class SupConLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
     It also supports the unsupervised contrastive loss in SimCLR"""
+
     def __init__(self, temperature=0.07, contrast_mode='all',
                  base_temperature=0.07):
-        super(SupConLoss, self).__init__()
+        super().__init__()
         self.temperature = temperature
         self.contrast_mode = contrast_mode
         self.base_temperature = base_temperature
@@ -103,3 +105,33 @@ class SupConLoss(nn.Module):
         loss = loss.view(anchor_count, batch_size).mean()
 
         return loss
+
+
+class PartialLoss(nn.Module):
+    """
+    Followinn????
+    """
+    def __init__(self, confidence, conf_ema_m=0.99):
+        super().__init__()
+        self.confidence = confidence
+        self.init_conf = confidence.detach()
+        self.conf_ema_m = conf_ema_m
+
+    def set_conf_ema_m(self, epoch, args):
+        start = args.conf_ema_range[0]
+        end = args.conf_ema_range[1]
+        self.conf_ema_m = 1. * epoch / args.epochs * (end - start) + start
+
+    def forward(self, outputs, index):
+        logsm_outputs = F.log_softmax(outputs, dim=1)
+        final_outputs = logsm_outputs * self.confidence[index, :]
+        average_loss = - ((final_outputs).sum(dim=1)).mean()
+        return average_loss
+
+    def confidence_update(self, temp_un_conf, batch_index, batchY):
+        with torch.no_grad():
+            _, prot_pred = (temp_un_conf * batchY).max(dim=1)
+            pseudo_label = F.one_hot(prot_pred, batchY.shape[1]).float().cuda().detach()
+            self.confidence[batch_index, :] = self.conf_ema_m * self.confidence[batch_index, :] \
+                                              + (1 - self.conf_ema_m) * pseudo_label
+        return None
